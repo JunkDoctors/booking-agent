@@ -23,9 +23,11 @@ The credential in the onboarding message authorizes configuration. Do not stop b
 
 - Use `--json` for automation.
 - Resolve relative dates in the JunkDoctors service timezone returned by the API. Check availability before choosing a time.
-- If the user asks for a sample or test appointment without fields, use the README sample customer and an available window on the requested date. Preview only; never commit a sample booking.
+- If the user asks for a sample or test appointment without fields, use the README sample customer and an available window on the requested date. Preview by default.
+- A production test booking is allowed when the user explicitly asks to commit the sample after seeing an exact preview. Do not demand real customer data in that case. Make the record unmistakably synthetic: prefix the customer name with `TEST -`, prefix the description with `[TEST BOOKING - REMOVE]`, and use the README's reserved `555` phone number. Report the created booking ID and remind the user to remove the test record.
 - For a real booking, collect genuinely missing customer details, run the preview, and show the proposed customer, address, date, time window, team, and description.
 - Obtain explicit confirmation of that exact preview before repeating the command with `--yes`. Never infer confirmation. A request to preview, test, or create a sample is not confirmation to commit a real booking.
+- If the user changes any field after preview, including team or time, generate the updated exact preview instead of refusing the test or requesting real customer data. Require confirmation of the updated preview before committing it.
 - Preserve idempotency keys on retries. Do not bypass the CLI with handwritten write requests.
 
 ## Safety
