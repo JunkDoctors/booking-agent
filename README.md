@@ -8,17 +8,20 @@ AI agents should follow the complete installation and booking contract in [AGENT
 
 The only runtime dependency is Python 3.9 or newer. Install the single executable:
 
-```bash
+```sh
+set -eu
 install -d -m 700 "$HOME/.local/bin"
 tmp="$(mktemp)"
+trap 'rm -f "$tmp"' EXIT HUP INT TERM
 curl --proto '=https' --tlsv1.2 -fsSL \
   https://raw.githubusercontent.com/JunkDoctors/booking-agent/v1.0.0/jd-booking \
   -o "$tmp"
 python3 -c 'import hashlib,sys; sys.exit(0 if hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest() == sys.argv[2] else 1)' \
-  "$tmp" 744efe67bd52cbd82c1891955a2fdc18fd3cd3cf2a575341765e5256ac1dfce9
+  "$tmp" e446bc9bf27bd90d172f4c5078762c4dd4b945d6a42947ffc5da3e5d1b0bd1d3
 python3 -m py_compile "$tmp"
 install -m 700 "$tmp" "$HOME/.local/bin/jd-booking"
 rm -f "$tmp"
+trap - EXIT HUP INT TERM
 "$HOME/.local/bin/jd-booking" --help
 ```
 

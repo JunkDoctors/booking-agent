@@ -45,9 +45,10 @@ class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
 
 class Config:
     def __init__(self) -> None:
-        base = _clean(os.environ.get("JD_BOOKING_API_BASE_URL")) or _clean(
-            os.environ.get("JD_SCHEDULING_API_BASE_URL")
-        ) or DEFAULT_API_BASE
+        if "JD_BOOKING_API_BASE_URL" in os.environ:
+            base = _clean(os.environ.get("JD_BOOKING_API_BASE_URL")) or DEFAULT_API_BASE
+        else:
+            base = _clean(os.environ.get("JD_SCHEDULING_API_BASE_URL")) or DEFAULT_API_BASE
         self.api_base = _validate_api_base(base)
         self.token = _load_token()
         timeout = os.environ.get("JD_BOOKING_TIMEOUT_MS", os.environ.get("JD_SCHEDULING_TIMEOUT_MS"))

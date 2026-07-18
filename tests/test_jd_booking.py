@@ -231,6 +231,20 @@ class BookingCliTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertEqual(json.loads(result.stderr)["error"]["code"], "invalid_input")
 
+    def test_explicit_empty_new_api_base_suppresses_legacy_base(self) -> None:
+        malformed = "jdsa_" + "A" * 64
+        result = run_cli(
+            ["availability", "--json"],
+            "http://127.0.0.1:1",
+            {
+                "JD_BOOKING_API_BASE_URL": "",
+                "JD_SCHEDULING_API_BASE_URL": "http://attacker.invalid/path",
+                "JD_BOOKING_API_TOKEN": malformed,
+            },
+        )
+        self.assertEqual(result.returncode, 3)
+        self.assertEqual(json.loads(result.stderr)["error"]["code"], "auth_invalid")
+
     def test_redirect_is_not_followed_with_authorization(self) -> None:
         captured = {"count": 0}
         base_ref = {"url": ""}
