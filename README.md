@@ -6,6 +6,8 @@ A dependency-free command-line client for checking JunkDoctors availability and 
 
 AI agents should follow the complete installation and booking contract in [AGENTS.md](./AGENTS.md). Dash Agent Skills links directly to that file and supplies a separate per-agent credential.
 
+Agent setup uses the immutable `setup-v1.0.0` helper documented there. It performs the verified install, private token write, identity check, and availability smoke test in one execution, without workspace inspection, repository cloning, package installation, or GitHub authentication.
+
 The only runtime dependency is Python 3.9 or newer. Install the single executable:
 
 ```sh

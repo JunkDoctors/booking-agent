@@ -8,6 +8,20 @@ JunkDoctors Booking is a dependency-free CLI skill for checking service availabi
 
 When a user gives you this file's GitHub URL followed by a `JD_BOOKING_API_TOKEN=<token>` line, complete setup without asking them to repeat the credential or copy it through another channel.
 
+This is a direct credential setup, not a coding task. Do not inspect the workspace, invoke a coding-agent workflow, delegate, search the web, clone a repository, probe Git/GitHub authentication, or install packages. The supplied contract URL is authoritative.
+
+### Required fast path
+
+Complete download, integrity checks, private installation, credential storage, identity verification, and the availability smoke test in one command execution. Download the immutable `setup-v1.0.0` helper, require SHA-256 `a13520bed9dfa44c89c2aed25504c6dd786a73de792d5805f4fa4971351bd478`, and run it with `--expected-agent` set to the agent name from the setup message. Supply only the raw token to that process through non-echoing standard input; never interpolate it into the shell command.
+
+The equivalent shell command is below. Replace only `<expected agent name>` using safe shell quoting, and send the token separately as process stdin:
+
+```bash
+install_dir="$HOME/.local/lib/jd-booking"; installer="$install_dir/install-jd-booking"; incoming="$installer.incoming"; mkdir -p "$install_dir" && chmod 700 "$install_dir" && curl -fsSL "https://raw.githubusercontent.com/JunkDoctors/booking-agent/setup-v1.0.0/install-jd-booking" -o "$incoming" && python3 -c 'import hashlib,sys; p=sys.argv[1]; expected=sys.argv[2]; actual=hashlib.sha256(open(p,"rb").read()).hexdigest(); sys.exit(0 if actual == expected else 1)' "$incoming" 'a13520bed9dfa44c89c2aed25504c6dd786a73de792d5805f4fa4971351bd478' && chmod 700 "$incoming" && mv "$incoming" "$installer" && python3 "$installer" --expected-agent '<expected agent name>'
+```
+
+The helper reuses an already verified CLI, so token rotation/setup reruns avoid downloading it again. It emits one concise JSON result and fails if the credential resolves to a different agent. Do not repeat its completed checks manually. Use the manual requirements below only if the immutable helper cannot be downloaded or executed, and report the exact blocker.
+
 1. Treat the credential as a secret. Do not quote it back, print it, include it in tool output, place it in a command-line argument, or expose it in an error.
 2. Require Python 3.9 or newer. Do not install Node.js, npm packages, or repository dependencies.
 3. Download the immutable `v1.0.0` executable from `https://raw.githubusercontent.com/JunkDoctors/booking-agent/v1.0.0/jd-booking` over HTTPS to a temporary file. Before executing it, require SHA-256 `e446bc9bf27bd90d172f4c5078762c4dd4b945d6a42947ffc5da3e5d1b0bd1d3` and run `python3 -m py_compile` against it. Abort on either mismatch or syntax failure.
@@ -42,5 +56,5 @@ The credential in the onboarding message authorizes configuration. Do not stop b
 
 - Do not work directly on `main`.
 - Keep CLI and dashboard API changes in separate repositories and PRs.
-- Run `python3 -m unittest -v tests/test_jd_booking.py`, `python3 -m py_compile jd-booking tests/test_jd_booking.py`, and `git diff --check` before pushing.
+- Run `python3 -m unittest -v tests/test_jd_booking.py tests/test_fast_installer.py`, `python3 -m py_compile jd-booking install-jd-booking tests/test_jd_booking.py tests/test_fast_installer.py`, and `git diff --check` before pushing.
 - The supported runtime is Python 3.9 or newer using only the standard library.

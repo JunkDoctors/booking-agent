@@ -1,0 +1,148 @@
+#!/usr/bin/env python3
+"""Fast, dependency-free installer for JunkDoctors Booking agents."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+import urllib.request
+from pathlib import Path
+from typing import Any, NoReturn
+
+CLI_URL = "https://raw.githubusercontent.com/JunkDoctors/booking-agent/v1.0.0/jd-booking"
+CLI_SHA256 = "e446bc9bf27bd90d172f4c5078762c4dd4b945d6a42947ffc5da3e5d1b0bd1d3"
+TOKEN_PATTERN = re.compile(r"^jdsa_[a-f0-9]{64}$")
+
+
+def fail(message: str) -> NoReturn:
+    print(json.dumps({"ok": False, "error": message}), file=sys.stderr)
+    raise SystemExit(1)
+
+
+def sha256(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def download_cli() -> bytes:
+    request = urllib.request.Request(CLI_URL, headers={"User-Agent": "jd-booking-fast-installer/1.0"})
+    with urllib.request.urlopen(request, timeout=20) as response:
+        return response.read()
+
+
+def write_private(path: Path, data: bytes, mode: int) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    os.chmod(path.parent, 0o700)
+    descriptor, temporary = tempfile.mkstemp(prefix=".jd-booking-", dir=str(path.parent))
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, mode)
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def install_cli(target: Path) -> str:
+    if target.is_file():
+        existing = target.read_bytes()
+        if sha256(existing) == CLI_SHA256:
+            os.chmod(target, 0o700)
+            return "already-current"
+
+    payload = download_cli()
+    if sha256(payload) != CLI_SHA256:
+        fail("CLI checksum verification failed")
+    try:
+        compile(payload, CLI_URL, "exec")
+    except SyntaxError:
+        fail("CLI syntax verification failed")
+    write_private(target, payload, 0o700)
+    return "installed"
+
+
+def read_token() -> str:
+    token = os.environ.get("JD_BOOKING_API_TOKEN", "").strip()
+    if not token and not sys.stdin.isatty():
+        token = sys.stdin.readline().strip()
+    if not TOKEN_PATTERN.fullmatch(token):
+        fail("Provide one valid JD booking token through the environment or standard input")
+    return token
+
+
+def verify(target: Path, expected_agent: str) -> dict[str, Any]:
+    environment = os.environ.copy()
+    environment.pop("JD_BOOKING_API_TOKEN", None)
+    result = subprocess.run(
+        [str(target), "availability", "--days", "1", "--json"],
+        text=True,
+        capture_output=True,
+        check=False,
+        env=environment,
+        timeout=30,
+    )
+    if result.returncode != 0:
+        fail("Authenticated availability verification failed")
+    try:
+        response = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        fail("Availability verification returned invalid JSON")
+    data = response.get("data") if isinstance(response.get("data"), dict) else {}
+    meta = data.get("meta") if isinstance(data.get("meta"), dict) else {}
+    actor = meta.get("actor") if isinstance(meta.get("actor"), dict) else {}
+    display_name = str(actor.get("displayName", "")).strip()
+    if expected_agent and display_name.casefold() != expected_agent.casefold():
+        fail("Credential resolved to a different agent identity")
+    return {"displayName": display_name}
+
+
+def configure_token(home: Path, executable: Path, token: str, expected_agent: str) -> dict[str, Any]:
+    token_path = home / ".jd" / "booking-token"
+    previous = token_path.read_bytes() if token_path.is_file() else None
+    try:
+        write_private(token_path, (token + "\n").encode("utf-8"), 0o600)
+        return verify(executable, expected_agent)
+    except BaseException:
+        if previous is None:
+            try:
+                token_path.unlink()
+            except FileNotFoundError:
+                pass
+        else:
+            write_private(token_path, previous, 0o600)
+        raise
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Install and authenticate JunkDoctors Booking in one pass")
+    parser.add_argument("--expected-agent", required=True)
+    args = parser.parse_args()
+
+    if sys.version_info < (3, 9):
+        fail("Python 3.9 or newer is required")
+
+    home = Path.home()
+    executable = home / ".local" / "bin" / "jd-booking"
+    install_state = install_cli(executable)
+    token = read_token()
+    actor = configure_token(home, executable, token, args.expected_agent)
+    token = ""
+    print(json.dumps({
+        "ok": True,
+        "install": install_state,
+        "executable": str(executable),
+        "actor": actor,
+    }))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
