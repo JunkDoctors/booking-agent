@@ -72,6 +72,8 @@ jd-booking book \
 
 Review the returned preview, then repeat the same command with `--yes` only after explicit confirmation. The server rechecks the window inside the write path. A deterministic idempotency key prevents retries from creating duplicates; callers may provide `--idempotency-key` explicitly.
 
+For an explicitly authorized production-path test, agents may commit the sample only after showing the exact preview. The committed record must use `TEST - Sample Customer`, prefix the description with `[TEST BOOKING - REMOVE]`, retain the reserved `555` sample phone number, and report the booking ID so the test record can be removed. Changing the requested team or time requires a fresh preview and confirmation, not real customer details.
+
 ## Command contract
 
 - Use `--json` for automation.
