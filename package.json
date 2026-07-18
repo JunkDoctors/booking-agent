@@ -7,9 +7,15 @@
   "bin": {
     "jd-schedule": "./bin/jd-schedule"
   },
+  "files": [
+    "bin/",
+    "dist/",
+    "README.md"
+  ],
   "scripts": {
     "build": "tsc",
     "check": "tsc --noEmit",
+    "prepack": "npm run build",
     "test": "npm run check && npm run build && node --test tests/*.test.mjs"
   },
   "engines": {

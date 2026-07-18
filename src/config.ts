@@ -12,14 +12,13 @@ export interface Config {
 
 interface StoredConfig {
   apiBaseUrl?: unknown;
-  apiToken?: unknown;
 }
 
 export function loadConfig(): Config {
   const stored = readStoredConfig(path.join(os.homedir(), ".jd", "config.json"));
   return {
     apiBaseUrl: clean(process.env.JD_SCHEDULING_API_BASE_URL) ?? clean(process.env.JD_API_BASE_URL) ?? clean(stored.apiBaseUrl) ?? defaultApiBaseUrl,
-    apiToken: clean(process.env.JD_SCHEDULING_API_TOKEN) ?? clean(process.env.JD_API_TOKEN) ?? clean(stored.apiToken),
+    apiToken: clean(process.env.JD_SCHEDULING_API_TOKEN),
     timeoutMs: parseTimeout(process.env.JD_SCHEDULING_TIMEOUT_MS)
   };
 }

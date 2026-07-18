@@ -14,15 +14,17 @@ The binary is `jd-schedule`.
 
 ## Configuration
 
-The CLI intentionally reuses Dash CLI configuration when available:
+Create or rotate an agent in Dash **Agent Skills**, then place the one-time token in the generated prompt's environment:
 
 ```bash
-export JD_SCHEDULING_API_TOKEN='...'
+export JD_SCHEDULING_API_TOKEN='<per-agent token from Agent Skills>'
 # Optional; defaults to https://www.junkdoctorsnj.com/dash/api/cli
 export JD_SCHEDULING_API_BASE_URL='https://www.junkdoctorsnj.com/dash/api/cli'
 ```
 
-Fallbacks are `JD_API_TOKEN`, `JD_API_BASE_URL`, then `~/.jd/config.json`. Tokens are never printed.
+`JD_SCHEDULING_API_TOKEN` is required and must be the per-agent credential issued on Agent Skills: the literal `jdsa_` prefix followed by exactly 64 lowercase hexadecimal characters. The CLI validates this format before making a request and never prints the token. Shared `JD_API_TOKEN` values and the `apiToken` in `~/.jd/config.json` are deliberately ignored for scheduling identity.
+
+The API base may still fall back to `JD_API_BASE_URL`, the `apiBaseUrl` in `~/.jd/config.json`, and then the production default. Normally no base override is needed; follow the environment instructions in the generated Agent Skills prompt.
 
 ## Find slots
 
@@ -60,11 +62,12 @@ Review the preview, then repeat with `--yes` to commit. The server rechecks the 
 - Exit `3`: missing/failed authentication.
 - Exit `4`: scheduling conflict.
 - Errors are emitted to stderr as `{ "ok": false, "error": { "code", "message", "status"? } }`.
+- Successful responses include non-secret authenticated actor metadata as `{ "agentUserId", "displayName" }`: under `data.meta.actor` for `slots` and `data.actor` for `book`. Credentials and token fragments are never returned.
 
 ### API
 
-`GET /schedule.php` lists availability using `date`, `days`, `duration`, `step`, `start`, `end`, `team`, `limit`, and `include_booked=1`.
+`GET /schedule.php` lists availability using `date`, `days`, `duration`, `step`, `start`, `end`, `team`, `limit`, and `include_booked=1`. Its `meta.actor` identifies the authenticated agent without exposing secret material.
 
-`POST /schedule.php` previews or creates a booking. The JSON body contains the popup-equivalent fields plus `team`, `dryRun`, and `idempotencyKey`. The same key is sent in the `Idempotency-Key` header. A commit must atomically recheck conflicts and return HTTP `409` if the team/window is no longer available.
+`POST /schedule.php` previews or creates a booking. The JSON body contains the popup-equivalent fields plus `team`, `dryRun`, and `idempotencyKey`; the response includes non-secret `actor` metadata. The same key is sent in the `Idempotency-Key` header. A commit must atomically recheck conflicts and return HTTP `409` if the team/window is no longer available.
 
 No production deployment is performed by this repository.

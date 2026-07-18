@@ -5,8 +5,7 @@ export class ApiError extends Error {
   constructor(
     message: string,
     public readonly status?: number,
-    public readonly code = "api_error",
-    public readonly details?: unknown
+    public readonly code = "api_error"
   ) {
     super(message);
     this.name = "ApiError";
@@ -43,7 +42,10 @@ export class SchedulingApi {
 
   private async request<T>(relative: string, init: RequestInit): Promise<T> {
     if (!this.config.apiToken) {
-      throw new ApiError("API token is required. Set JD_SCHEDULING_API_TOKEN or JD_API_TOKEN, or configure ~/.jd/config.json.", undefined, "auth_missing");
+      throw new ApiError("A per-agent scheduling token is required. Generate one in Dash Agent Skills and set JD_SCHEDULING_API_TOKEN.", undefined, "auth_missing");
+    }
+    if (!/^jdsa_[a-f0-9]{64}$/.test(this.config.apiToken)) {
+      throw new ApiError("JD_SCHEDULING_API_TOKEN is malformed. Expected jdsa_ followed by 64 lowercase hexadecimal characters.", undefined, "auth_invalid");
     }
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.config.timeoutMs);
@@ -64,9 +66,12 @@ export class SchedulingApi {
       try { data = text ? JSON.parse(text) : null; } catch { data = { raw: text }; }
       if (!response.ok) {
         const record = isRecord(data) ? data : {};
-        const message = stringValue(record.message) ?? stringValue(record.error) ?? `Scheduling API returned HTTP ${response.status}.`;
-        const code = stringValue(record.code) ?? statusCode(response.status);
-        throw new ApiError(message, response.status, code, data);
+        const message = sanitizeApiText(
+          stringValue(record.message) ?? stringValue(record.error) ?? `Scheduling API returned HTTP ${response.status}.`,
+          this.config.apiToken
+        );
+        const code = sanitizeApiText(stringValue(record.code) ?? statusCode(response.status), this.config.apiToken);
+        throw new ApiError(message, response.status, code);
       }
       return data as T;
     } catch (error) {
@@ -74,7 +79,8 @@ export class SchedulingApi {
       if (error instanceof Error && error.name === "AbortError") {
         throw new ApiError(`Scheduling API timed out after ${this.config.timeoutMs}ms.`, undefined, "timeout");
       }
-      throw new ApiError(error instanceof Error ? error.message : "Scheduling API request failed.", undefined, "network_error");
+      const message = error instanceof Error ? error.message : "Scheduling API request failed.";
+      throw new ApiError(sanitizeApiText(message, this.config.apiToken), undefined, "network_error");
     } finally {
       clearTimeout(timer);
     }
@@ -91,6 +97,13 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function stringValue(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+function sanitizeApiText(value: string, configuredToken: string): string {
+  const redaction = "[REDACTED]";
+  return value
+    .replaceAll(configuredToken, redaction)
+    .replace(/jdsa_[a-f0-9]{64}/g, redaction);
 }
 
 function statusCode(status: number): string {
