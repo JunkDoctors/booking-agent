@@ -1,56 +1,61 @@
-# JunkDoctors Scheduling CLI
+# JunkDoctors Booking
 
-A standalone, safe CLI for finding availability and scheduling JunkDoctors services through the authenticated Dash API.
+A dependency-free command-line client for checking JunkDoctors availability and safely previewing or creating bookings through the authenticated Dash API.
 
 ## Install
 
-AI agents should follow the complete installation and booking contract in
-[AGENTS.md](./AGENTS.md). A generated Dash onboarding prompt links directly to
-that file and supplies the per-agent credential separately.
+AI agents should follow the complete installation and booking contract in [AGENTS.md](./AGENTS.md). Dash Agent Skills links directly to that file and supplies a separate per-agent credential.
+
+The only runtime dependency is Python 3.9 or newer. Install the single executable:
 
 ```bash
-npm install
-npm run build
-npm link
+install -d -m 700 "$HOME/.local/bin"
+tmp="$(mktemp)"
+curl --proto '=https' --tlsv1.2 -fsSL \
+  https://raw.githubusercontent.com/JunkDoctors/booking-agent/v1.0.0/jd-booking \
+  -o "$tmp"
+python3 -c 'import hashlib,sys; sys.exit(0 if hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest() == sys.argv[2] else 1)' \
+  "$tmp" 744efe67bd52cbd82c1891955a2fdc18fd3cd3cf2a575341765e5256ac1dfce9
+python3 -m py_compile "$tmp"
+install -m 700 "$tmp" "$HOME/.local/bin/jd-booking"
+rm -f "$tmp"
+"$HOME/.local/bin/jd-booking" --help
 ```
 
-The binary is `jd-schedule`.
+No repository clone, Node.js, npm, build, or global package link is required.
+Add `~/.local/bin` to the agent runtime's persistent `PATH` when it is not
+already available, or invoke the installed executable by its absolute path.
 
 ## Configuration
 
-Create or rotate an agent in Dash **Agent Skills**, then place the credential from the generated prompt in the agent's environment:
+Create or rotate an agent in Dash Agent Skills, then supply its credential as:
 
 ```bash
-export JD_SCHEDULING_API_TOKEN='<per-agent token from Agent Skills>'
-# Optional; defaults to https://www.junkdoctorsnj.com/dash/api/cli
-export JD_SCHEDULING_API_BASE_URL='https://www.junkdoctorsnj.com/dash/api/cli'
+export JD_BOOKING_API_TOKEN='<per-agent token from Agent Skills>'
 ```
 
-`JD_SCHEDULING_API_TOKEN` is required and must be the per-agent credential issued on Agent Skills: the literal `jdsa_` prefix followed by exactly 64 lowercase hexadecimal characters. The CLI validates this format before making a request and never prints the token. Shared `JD_API_TOKEN` values and the `apiToken` in `~/.jd/config.json` are deliberately ignored for scheduling identity.
+The token is the literal `jdsa_` prefix followed by exactly 64 lowercase hexadecimal characters. The CLI validates the format before making a request and never prints it.
 
-For agent environments without a persistent secret store, the raw token may
-instead be saved in `~/.jd/scheduling-token`. On macOS and Linux, the CLI uses
-that fallback only when the file is owned by the current user and has mode
-`0600`. This fallback is disabled on Windows. When the environment variable is
-explicitly present, including an empty value, it takes precedence over the
-file.
+For agent environments without persistent secret storage, the raw token may instead be saved in `~/.jd/booking-token`. On macOS and Linux, the file must be owned by the current user with mode `0600`. The file fallback is disabled on Windows. An explicitly present `JD_BOOKING_API_TOKEN`, including an empty value, takes precedence over the file.
 
-The API base may still fall back to `JD_API_BASE_URL`, the `apiBaseUrl` in `~/.jd/config.json`, and then the production default. Normally no base override is needed; follow the environment instructions in the generated Agent Skills prompt.
+The production API defaults to `https://www.junkdoctorsnj.com/dash/api/cli`. `JD_BOOKING_API_BASE_URL` is available for tests and explicit non-production targets.
 
-## Find slots
+Existing installations may transition without immediate reconfiguration: the CLI temporarily accepts `JD_SCHEDULING_API_TOKEN`, `JD_SCHEDULING_API_BASE_URL`, `~/.jd/scheduling-token`, and the `slots` command alias when their new equivalents are absent.
+
+## Availability
 
 ```bash
-jd-schedule slots
-jd-schedule slots --date 2026-07-20 --days 7 --team b --duration 120
-jd-schedule slots --booked --json
+jd-booking availability
+jd-booking availability --date 2026-07-20 --days 7 --team b --duration 120
+jd-booking availability --booked --json
 ```
 
-## Book a service
+## Preview or create a booking
 
 Booking is preview-only unless `--yes` is present.
 
 ```bash
-jd-schedule book \
+jd-booking book \
   --name "Sample Customer" \
   --phone "973-555-0100" \
   --address "123 Main St, Sparta, NJ 07871" \
@@ -62,23 +67,21 @@ jd-schedule book \
   --team a
 ```
 
-Review the preview, then repeat with `--yes` to commit. The server rechecks the window inside the write path. A deterministic idempotency key prevents a retry from creating a duplicate; callers may provide `--idempotency-key` explicitly.
+Review the returned preview, then repeat the same command with `--yes` only after explicit confirmation. The server rechecks the window inside the write path. A deterministic idempotency key prevents retries from creating duplicates; callers may provide `--idempotency-key` explicitly.
 
-## Agent contract
+## Command contract
 
 - Use `--json` for automation.
-- Exit `0`: success, including dry-run or idempotent replay.
+- Exit `0`: success, including preview or idempotent replay.
 - Exit `1`: network/server failure.
 - Exit `2`: invalid CLI input.
-- Exit `3`: missing/failed authentication.
-- Exit `4`: scheduling conflict.
+- Exit `3`: missing or failed authentication.
+- Exit `4`: booking conflict.
 - Errors are emitted to stderr as `{ "ok": false, "error": { "code", "message", "status"? } }`.
-- Successful responses include non-secret authenticated actor metadata as `{ "agentUserId", "displayName" }`: under `data.meta.actor` for `slots` and `data.actor` for `book`. Credentials and token fragments are never returned.
+- Successful responses include non-secret authenticated actor metadata as `{ "agentUserId", "displayName" }`.
 
-### API
+## API
 
-`GET /schedule.php` lists availability using `date`, `days`, `duration`, `step`, `start`, `end`, `team`, `limit`, and `include_booked=1`. Its `meta.actor` identifies the authenticated agent without exposing secret material.
-
-`POST /schedule.php` previews or creates a booking. The JSON body contains the popup-equivalent fields plus `team`, `dryRun`, and `idempotencyKey`; the response includes non-secret `actor` metadata. The same key is sent in the `Idempotency-Key` header. A commit must atomically recheck conflicts and return HTTP `409` if the team/window is no longer available.
+`GET /schedule.php` lists availability. `POST /schedule.php` previews or creates a booking. Both use a per-agent bearer credential. Commit requests include a matching body/header idempotency key, and the server atomically rechecks conflicts.
 
 No production deployment is performed by this repository.

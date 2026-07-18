@@ -1,0 +1,427 @@
+#!/usr/bin/env python3
+"""Dependency-free JunkDoctors availability and booking CLI."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import re
+import stat
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+from datetime import datetime
+from pathlib import Path
+from typing import Any, NoReturn
+
+DEFAULT_API_BASE = "https://www.junkdoctorsnj.com/dash/api/cli"
+TOKEN_PATTERN = re.compile(r"^jdsa_[a-f0-9]{64}$")
+TOKEN_REDACTION_PATTERN = re.compile(r"jdsa_[a-f0-9]{64}")
+
+
+class InputError(Exception):
+    pass
+
+
+class ApiError(Exception):
+    def __init__(self, message: str, status: int | None = None, code: str = "api_error") -> None:
+        super().__init__(message)
+        self.status = status
+        self.code = code
+
+
+class BookingArgumentParser(argparse.ArgumentParser):
+    def error(self, message: str) -> NoReturn:
+        raise InputError(message)
+
+
+class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request: urllib.request.Request, file_pointer: Any, code: int, message: str, headers: Any, new_url: str) -> None:
+        return None
+
+
+class Config:
+    def __init__(self) -> None:
+        base = _clean(os.environ.get("JD_BOOKING_API_BASE_URL")) or _clean(
+            os.environ.get("JD_SCHEDULING_API_BASE_URL")
+        ) or DEFAULT_API_BASE
+        self.api_base = _validate_api_base(base)
+        self.token = _load_token()
+        timeout = os.environ.get("JD_BOOKING_TIMEOUT_MS", os.environ.get("JD_SCHEDULING_TIMEOUT_MS"))
+        self.timeout = _parse_timeout(timeout) / 1000
+
+
+def _clean(value: object) -> str | None:
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _validate_api_base(value: str) -> str:
+    parsed = urllib.parse.urlsplit(value)
+    loopback = parsed.hostname in {"127.0.0.1", "localhost", "::1"}
+    if (
+        not parsed.netloc
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+        or (parsed.scheme != "https" and not (parsed.scheme == "http" and loopback))
+    ):
+        raise InputError("JD_BOOKING_API_BASE_URL must be an HTTPS URL without credentials, query, or fragment.")
+    return value.rstrip("/")
+
+
+def _load_token() -> str | None:
+    # Explicit values, including empty values, override all file fallbacks.
+    if "JD_BOOKING_API_TOKEN" in os.environ:
+        return _clean(os.environ.get("JD_BOOKING_API_TOKEN"))
+    # Backward compatibility for agents configured before the rename.
+    if "JD_SCHEDULING_API_TOKEN" in os.environ:
+        return _clean(os.environ.get("JD_SCHEDULING_API_TOKEN"))
+    present, token = _read_private_token(Path.home() / ".jd" / "booking-token")
+    if present:
+        return token
+    _, legacy_token = _read_private_token(Path.home() / ".jd" / "scheduling-token")
+    return legacy_token
+
+
+def _read_private_token(path: Path) -> tuple[bool, str | None]:
+    if os.name == "nt":
+        return False, None
+    try:
+        info = path.stat()
+        if not stat.S_ISREG(info.st_mode):
+            return True, None
+        if hasattr(os, "getuid") and info.st_uid != os.getuid():
+            return True, None
+        if stat.S_IMODE(info.st_mode) & 0o077:
+            return True, None
+        return True, _clean(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return False, None
+    except OSError:
+        return True, None
+
+
+def _parse_timeout(value: str | None) -> int:
+    try:
+        parsed = int(value) if value is not None else 15_000
+    except ValueError:
+        return 15_000
+    return parsed if 1_000 <= parsed <= 120_000 else 15_000
+
+
+def _parser() -> BookingArgumentParser:
+    parser = BookingArgumentParser(prog="jd-booking", description="JunkDoctors Booking")
+    parser.add_argument("--json", action="store_true", help="stable machine-readable output")
+    subparsers = parser.add_subparsers(dest="command")
+
+    availability = subparsers.add_parser("availability", aliases=["slots"], help="find open Team A/B/C service windows")
+    availability.add_argument("--json", action="store_true")
+    availability.add_argument("--date")
+    availability.add_argument("--days")
+    availability.add_argument("--team")
+    availability.add_argument("--duration")
+    availability.add_argument("--step")
+    availability.add_argument("--start")
+    availability.add_argument("--end")
+    availability.add_argument("--booked", action="store_true")
+    availability.add_argument("--limit")
+
+    book = subparsers.add_parser("book", help="preview or create a booking; preview is the default")
+    book.add_argument("--json", action="store_true")
+    book.add_argument("--name", required=True)
+    book.add_argument("--phone", required=True)
+    book.add_argument("--address", required=True)
+    book.add_argument("--date", required=True)
+    book.add_argument("--start", required=True)
+    book.add_argument("--end", required=True)
+    book.add_argument("--description", required=True)
+    book.add_argument("--email")
+    book.add_argument("--source")
+    book.add_argument("--referrer")
+    book.add_argument("--team", default="a")
+    book.add_argument("--idempotency-key")
+    write_mode = book.add_mutually_exclusive_group()
+    write_mode.add_argument("--dry-run", action="store_true")
+    write_mode.add_argument("--yes", action="store_true", help="commit after explicit confirmation")
+    return parser
+
+
+def _integer(value: str | None, label: str, minimum: int, maximum: int) -> int | None:
+    if value is None:
+        return None
+    if not value.isdigit():
+        raise InputError(f"{label} must be a whole number.")
+    parsed = int(value)
+    if not minimum <= parsed <= maximum:
+        raise InputError(f"{label} must be between {minimum} and {maximum}.")
+    return parsed
+
+
+def _date(value: str, label: str) -> str:
+    try:
+        if datetime.strptime(value, "%Y-%m-%d").strftime("%Y-%m-%d") != value:
+            raise ValueError
+    except ValueError as error:
+        raise InputError(f"{label} must be a valid date in YYYY-MM-DD format.") from error
+    return value
+
+
+def _time(value: str, label: str) -> str:
+    if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", value):
+        raise InputError(f"{label} must use 24-hour HH:MM.")
+    return value
+
+
+def _minutes(value: str) -> int:
+    hour, minute = (int(part) for part in value.split(":"))
+    return hour * 60 + minute
+
+
+def _phone(value: str) -> str:
+    digits = re.sub(r"\D", "", value)
+    if len(digits) == 11 and digits.startswith("1"):
+        digits = digits[1:]
+    if len(digits) != 10:
+        raise InputError("--phone must contain a 10-digit US phone number.")
+    return f"{digits[:3]}-{digits[3:6]}-{digits[6:]}"
+
+
+def _availability_options(args: argparse.Namespace) -> dict[str, str]:
+    options: dict[str, str] = {}
+    if args.date:
+        options["date"] = _date(args.date, "--date")
+    for name, minimum, maximum in (("days", 1, 60), ("duration", 30, 480), ("step", 15, 240), ("limit", 1, 1000)):
+        parsed = _integer(getattr(args, name), f"--{name}", minimum, maximum)
+        if parsed is not None:
+            options[name] = str(parsed)
+    if args.team:
+        if args.team not in {"all", "a", "b", "c"}:
+            raise InputError("--team must be all, a, b, or c.")
+        options["team"] = args.team
+    if args.start:
+        options["start"] = _time(args.start, "--start")
+    if args.end:
+        options["end"] = _time(args.end, "--end")
+    if args.booked:
+        options["include_booked"] = "1"
+    return options
+
+
+def _booking_input(args: argparse.Namespace) -> dict[str, Any]:
+    start = _time(args.start, "--start")
+    end = _time(args.end, "--end")
+    if _minutes(end) <= _minutes(start):
+        raise InputError("--end must be after --start on the same day.")
+    if args.email and not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", args.email):
+        raise InputError("--email must be a valid email address.")
+    if args.team not in {"a", "b", "c"}:
+        raise InputError("--team must be a, b, or c for booking.")
+    source = args.source.strip() if args.source else (
+        "Scheduling CLI" if os.environ.get("JD_BOOKING_LEGACY_MODE") == "1" else "JunkDoctors Booking"
+    )
+    core: dict[str, Any] = {
+        "name": args.name.strip(),
+        "phone": _phone(args.phone),
+        "address": args.address.strip(),
+        "date": _date(args.date, "--date"),
+        "startTime": start,
+        "endTime": end,
+        "description": args.description.strip(),
+    }
+    if args.email:
+        core["email"] = args.email.strip()
+    core["source"] = source
+    if args.referrer:
+        core["referrer"] = args.referrer.strip()
+    core["team"] = args.team
+    for field, label in (("name", "--name"), ("address", "--address"), ("description", "--description"), ("source", "--source")):
+        if not core[field]:
+            raise InputError(f"{label} is required.")
+    key = args.idempotency_key or hashlib.sha256(
+        json.dumps(core, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()[:32]
+    if not re.fullmatch(r"[A-Za-z0-9._:-]{8,128}", key):
+        raise InputError("--idempotency-key must be 8-128 safe characters.")
+    return {**core, "dryRun": not args.yes, "idempotencyKey": key}
+
+
+def _request(config: Config, relative: str, method: str = "GET", payload: dict[str, Any] | None = None) -> Any:
+    if not config.token:
+        raise ApiError(
+            "A per-agent booking token is required. Generate one in Dash Agent Skills and set JD_BOOKING_API_TOKEN.",
+            code="auth_missing",
+        )
+    if not TOKEN_PATTERN.fullmatch(config.token):
+        raise ApiError(
+            "JD_BOOKING_API_TOKEN is malformed. Expected jdsa_ followed by 64 lowercase hexadecimal characters.",
+            code="auth_invalid",
+        )
+    headers = {
+        "Accept": "application/json",
+        "Authorization": f"Bearer {config.token}",
+        "User-Agent": "junkdoctors-booking/1.0",
+    }
+    body = None
+    if payload is not None:
+        body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+        headers["Idempotency-Key"] = payload["idempotencyKey"]
+    request = urllib.request.Request(f"{config.api_base}{relative}", data=body, headers=headers, method=method)
+    try:
+        opener = urllib.request.build_opener(NoRedirectHandler())
+        with opener.open(request, timeout=config.timeout) as response:
+            raw = response.read().decode("utf-8")
+            return json.loads(raw) if raw else None
+    except urllib.error.HTTPError as error:
+        raw = error.read().decode("utf-8", errors="replace")
+        try:
+            data = json.loads(raw) if raw else {}
+        except ValueError:
+            data = {}
+        record = data if isinstance(data, dict) else {}
+        message = record.get("message") or record.get("error") or f"Booking API returned HTTP {error.code}."
+        code = record.get("code") or _status_code(error.code)
+        raise ApiError(_redact(str(message), config.token), error.code, _redact(str(code), config.token)) from error
+    except (urllib.error.URLError, TimeoutError, OSError) as error:
+        reason = getattr(error, "reason", error)
+        if isinstance(reason, TimeoutError) or "timed out" in str(reason).lower():
+            raise ApiError(f"Booking API timed out after {int(config.timeout * 1000)}ms.", code="timeout") from error
+        raise ApiError(_redact(str(reason) or "Booking API request failed.", config.token), code="network_error") from error
+    except ValueError as error:
+        raise ApiError("Booking API returned malformed JSON.", code="invalid_response") from error
+
+
+def _status_code(status_code: int) -> str:
+    if status_code in {401, 403}:
+        return "unauthorized"
+    if status_code == 409:
+        return "schedule_conflict"
+    if status_code in {400, 422}:
+        return "invalid_request"
+    return "api_error"
+
+
+def _redact(value: str, token: str) -> str:
+    return TOKEN_REDACTION_PATTERN.sub("[REDACTED]", value.replace(token, "[REDACTED]"))
+
+
+def _valid_actor(value: object) -> bool:
+    return (
+        isinstance(value, dict)
+        and isinstance(value.get("agentUserId"), str)
+        and bool(value["agentUserId"])
+        and isinstance(value.get("displayName"), str)
+        and bool(value["displayName"])
+    )
+
+
+def _slots_human(slots: list[dict[str, Any]]) -> str:
+    if not slots:
+        return "No open booking windows found."
+    lines = ["DATE        WINDOW             TEAM     STATUS", "----------  -----------------  -------  ---------"]
+    for slot in slots:
+        lines.append(
+            f"{str(slot.get('date', '')).ljust(10)}  {str(slot.get('window', '')).ljust(17)}  "
+            f"{str(slot.get('team', '')).ljust(7)}  {'available' if slot.get('available') else 'booked'}"
+        )
+    return "\n".join(lines)
+
+
+def _booking_human(result: dict[str, Any]) -> str:
+    booking = result["booking"]
+    heading = (
+        "BOOKING PREVIEW (no changes made)"
+        if result["dryRun"]
+        else "BOOKING ALREADY EXISTS (safe replay)"
+        if result.get("idempotentReplay")
+        else "BOOKING CREATED"
+    )
+    window = booking.get("window") or f"{booking['startTime']} - {booking['endTime']}"
+    lines = [
+        heading,
+        f"Customer: {booking['name']} ({booking['phone']})",
+        f"When: {booking['date']} {window}",
+        f"Team: {booking['team']}",
+        f"Address: {booking['address']}",
+    ]
+    if booking.get("jobId"):
+        lines.append(f"Job ID: {booking['jobId']}")
+    if result["dryRun"]:
+        lines.append("Run the same command with --yes to commit.")
+    return "\n".join(lines)
+
+
+def _emit(json_output: bool, value: dict[str, Any], human: str) -> None:
+    print(json.dumps(value, indent=2) if json_output else human)
+
+
+def _fail(error: Exception, json_output: bool) -> int:
+    api = isinstance(error, ApiError)
+    code = "invalid_input" if isinstance(error, InputError) else error.code if api else "unexpected_error"
+    status_code = error.status if api else None
+    payload: dict[str, Any] = {"ok": False, "error": {"code": code, "message": str(error)}}
+    if status_code:
+        payload["error"]["status"] = status_code
+    print(json.dumps(payload, indent=2) if json_output else f"Error [{code}]: {error}", file=sys.stderr)
+    if isinstance(error, InputError):
+        return 2
+    if status_code in {401, 403} or code in {"auth_missing", "auth_invalid"}:
+        return 3
+    if status_code == 409:
+        return 4
+    return 1
+
+
+def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    json_output = "--json" in argv
+    parser = _parser()
+    try:
+        args = parser.parse_args(argv)
+        json_output = "--json" in argv
+        if not args.command:
+            parser.print_help()
+            return 0
+        config = Config()
+        if args.command in {"availability", "slots"}:
+            options = _availability_options(args)
+            query = urllib.parse.urlencode(options)
+            result = _request(config, f"/schedule.php{f'?{query}' if query else ''}")
+            if (
+                not isinstance(result, dict)
+                or not isinstance(result.get("availability"), list)
+                or not isinstance(result.get("booked"), list)
+                or not isinstance(result.get("meta"), dict)
+                or not _valid_actor(result["meta"].get("actor"))
+            ):
+                raise ApiError("Booking API returned a malformed availability response.", code="invalid_response")
+            _emit(
+                json_output,
+                {"ok": True, "command": "availability", "data": result},
+                _slots_human(result["availability"] + result["booked"]),
+            )
+            return 0
+        payload = _booking_input(args)
+        result = _request(config, "/schedule.php", method="POST", payload=payload)
+        if (
+            not isinstance(result, dict)
+            or not isinstance(result.get("booking"), dict)
+            or not isinstance(result.get("dryRun"), bool)
+            or not isinstance(result.get("changed"), bool)
+            or not _valid_actor(result.get("actor"))
+        ):
+            raise ApiError("Booking API returned a malformed booking response.", code="invalid_response")
+        _emit(json_output, {"ok": True, "command": "book", "data": result}, _booking_human(result))
+        return 0
+    except (InputError, ApiError) as error:
+        return _fail(error, json_output)
+    except Exception as error:  # Fail closed without a traceback or secret-bearing internals.
+        return _fail(Exception("Unexpected booking CLI failure."), json_output)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
