@@ -53,9 +53,11 @@ Book options:
   --yes                   Commit the booking
 
 Configuration:
-  JD_SCHEDULING_API_BASE_URL / JD_API_BASE_URL
-  JD_SCHEDULING_API_TOKEN / JD_API_TOKEN
-  Existing ~/.jd/config.json is also supported.
+  JD_SCHEDULING_API_TOKEN      Required per-agent token from Dash Agent Skills
+                               (jdsa_ + 64 lowercase hexadecimal characters)
+  JD_SCHEDULING_API_BASE_URL   Optional API base override
+  JD_API_BASE_URL and ~/.jd/config.json may supply only the API base URL.
+  JD_API_TOKEN is never used for scheduling authentication.
 `;
 
 export async function run(argv: string[]): Promise<void> {
@@ -261,7 +263,7 @@ function fail(error: unknown, json: boolean): void {
   const status = api ? error.status : undefined;
   const payload = { ok: false, error: { code, message, ...(status ? { status } : {}) } };
   console.error(json ? JSON.stringify(payload, null, 2) : `Error [${code}]: ${message}`);
-  process.exitCode = input ? 2 : status === 401 || status === 403 || code === "auth_missing" ? 3 : status === 409 ? 4 : 1;
+  process.exitCode = input ? 2 : status === 401 || status === 403 || code === "auth_missing" || code === "auth_invalid" ? 3 : status === 409 ? 4 : 1;
 }
 
 if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).href) {

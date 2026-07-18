@@ -1,11 +1,15 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import http from "node:http";
+import os from "node:os";
+import path from "node:path";
 import { test } from "node:test";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 const root = new URL("..", import.meta.url);
+const validToken = `jdsa_${"a".repeat(64)}`;
 
 async function withApi(handler, callback) {
   const server = http.createServer(handler);
@@ -18,13 +22,17 @@ async function withApi(handler, callback) {
   }
 }
 
-async function cli(args, baseUrl) {
+async function cli(args, baseUrl, overrides = {}) {
+  const env = { ...process.env };
+  delete env.JD_SCHEDULING_API_TOKEN;
+  delete env.JD_API_TOKEN;
   return execFileAsync("node", ["bin/jd-schedule", ...args], {
     cwd: root,
     env: {
-      ...process.env,
+      ...env,
       JD_SCHEDULING_API_BASE_URL: baseUrl,
-      JD_SCHEDULING_API_TOKEN: "test-token"
+      JD_SCHEDULING_API_TOKEN: validToken,
+      ...overrides
     }
   });
 }
@@ -36,7 +44,7 @@ function json(response, status, payload) {
 
 test("slots forwards filters and returns a stable JSON envelope", async () => {
   await withApi((request, response) => {
-    assert.equal(request.headers.authorization, "Bearer test-token");
+    assert.equal(request.headers.authorization, `Bearer ${validToken}`);
     const url = new URL(request.url, "http://localhost");
     assert.equal(url.pathname, "/schedule.php");
     assert.equal(url.searchParams.get("date"), "2026-07-20");
@@ -45,7 +53,7 @@ test("slots forwards filters and returns a stable JSON envelope", async () => {
     json(response, 200, {
       availability: [{ date: "2026-07-20", day: "Mon Jul 20", start: "2026-07-20 09:00:00", end: "2026-07-20 11:00:00", window: "9am - 11am", team: "Team B", teamKey: "b", available: true, conflicts: [] }],
       booked: [],
-      meta: { timezone: "America/New_York" }
+      meta: { timezone: "America/New_York", actor: { agentUserId: "agent00001", displayName: "Scheduler One" } }
     });
   }, async (baseUrl) => {
     const { stdout } = await cli(["slots", "--date", "2026-07-20", "--team", "b", "--booked", "--json"], baseUrl);
@@ -53,7 +61,69 @@ test("slots forwards filters and returns a stable JSON envelope", async () => {
     assert.equal(output.ok, true);
     assert.equal(output.command, "slots");
     assert.equal(output.data.availability[0].teamKey, "b");
+    assert.deepEqual(output.data.meta.actor, { agentUserId: "agent00001", displayName: "Scheduler One" });
   });
+});
+
+test("missing per-agent token exits auth failure and ignores legacy token sources without calling the API", async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), "jd-schedule-home-"));
+  await mkdir(path.join(home, ".jd"));
+  await writeFile(path.join(home, ".jd", "config.json"), JSON.stringify({ apiToken: "legacy-config-token" }));
+  let calls = 0;
+  try {
+    await withApi((_request, response) => {
+      calls++;
+      json(response, 500, { error: "should not be called" });
+    }, async (baseUrl) => {
+      await assert.rejects(
+        cli(["slots", "--json"], baseUrl, {
+          HOME: home,
+          JD_API_TOKEN: "legacy-shared-token",
+          JD_SCHEDULING_API_TOKEN: undefined
+        }),
+        (error) => {
+          assert.equal(error.code, 3);
+          const payload = JSON.parse(error.stderr);
+          assert.equal(payload.error.code, "auth_missing");
+          assert.match(payload.error.message, /Agent Skills/);
+          assert.doesNotMatch(error.stderr, /legacy-(?:shared|config)-token/);
+          return true;
+        }
+      );
+      assert.equal(calls, 0);
+    });
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("malformed per-agent token exits auth failure without calling the API or printing the token", async () => {
+  const malformed = `jdsa_${"A".repeat(64)}`;
+  let calls = 0;
+  await withApi((_request, response) => {
+    calls++;
+    json(response, 500, { error: "should not be called" });
+  }, async (baseUrl) => {
+    await assert.rejects(
+      cli(["slots", "--json"], baseUrl, { JD_SCHEDULING_API_TOKEN: malformed }),
+      (error) => {
+        assert.equal(error.code, 3);
+        const payload = JSON.parse(error.stderr);
+        assert.equal(payload.error.code, "auth_invalid");
+        assert.match(payload.error.message, /64 lowercase hexadecimal characters/);
+        assert.doesNotMatch(error.stderr, new RegExp(malformed));
+        return true;
+      }
+    );
+    assert.equal(calls, 0);
+  });
+});
+
+test("help documents only per-agent scheduling tokens for authentication", async () => {
+  const { stdout } = await cli(["--help"], "http://127.0.0.1:1");
+  assert.match(stdout, /Required per-agent token from Dash Agent Skills/);
+  assert.match(stdout, /JD_API_TOKEN is never used for scheduling authentication/);
+  assert.doesNotMatch(stdout, /JD_SCHEDULING_API_TOKEN \/ JD_API_TOKEN/);
 });
 
 test("book defaults to dry-run and sends popup-equivalent fields", async () => {
@@ -74,7 +144,8 @@ test("book defaults to dry-run and sends popup-equivalent fields", async () => {
       dryRun: true,
       changed: true,
       idempotencyKey: body.idempotencyKey,
-      booking: { ...body, team: "Team A", window: "9am - 11am" }
+      booking: { ...body, team: "Team A", window: "9am - 11am" },
+      actor: { agentUserId: "agent00001", displayName: "Scheduler One" }
     });
   }, async (baseUrl) => {
     const { stdout } = await cli([
@@ -86,6 +157,7 @@ test("book defaults to dry-run and sends popup-equivalent fields", async () => {
     const output = JSON.parse(stdout);
     assert.equal(output.data.dryRun, true);
     assert.equal(output.data.changed, true);
+    assert.deepEqual(output.data.actor, { agentUserId: "agent00001", displayName: "Scheduler One" });
   });
 });
 
@@ -100,7 +172,8 @@ test("--yes is the only booking commit switch", async () => {
       dryRun: false,
       changed: true,
       idempotencyKey: body.idempotencyKey,
-      booking: { ...body, jobId: "job_123", team: "Team C" }
+      booking: { ...body, jobId: "job_123", team: "Team C" },
+      actor: { agentUserId: "agent00001", displayName: "Scheduler One" }
     });
   }, async (baseUrl) => {
     const { stdout } = await cli([
@@ -166,6 +239,33 @@ test("HTTP 409 maps to a typed conflict and exit 4", async () => {
         const payload = JSON.parse(error.stderr);
         assert.equal(payload.error.code, "schedule_conflict");
         assert.equal(payload.error.status, 409);
+        return true;
+      }
+    );
+  });
+});
+
+test("API errors redact configured and token-shaped secrets without losing status or exit typing", async () => {
+  const otherToken = `jdsa_${"b".repeat(64)}`;
+  await withApi((_request, response) => {
+    json(response, 409, {
+      code: "schedule_conflict",
+      message: `Request with ${validToken} conflicted; diagnostic token ${otherToken}.`,
+      details: { authorization: `Bearer ${validToken}`, diagnosticToken: otherToken }
+    });
+  }, async (baseUrl) => {
+    await assert.rejects(
+      cli(["slots", "--json"], baseUrl),
+      (error) => {
+        assert.equal(error.code, 4);
+        const payload = JSON.parse(error.stderr);
+        assert.equal(payload.error.code, "schedule_conflict");
+        assert.equal(payload.error.status, 409);
+        assert.equal(payload.error.message, "Request with [REDACTED] conflicted; diagnostic token [REDACTED].");
+        assert.doesNotMatch(error.stdout, /jdsa_[a-f0-9]{64}/);
+        assert.doesNotMatch(error.stderr, /jdsa_[a-f0-9]{64}/);
+        assert.doesNotMatch(error.stdout, new RegExp(validToken));
+        assert.doesNotMatch(error.stderr, new RegExp(validToken));
         return true;
       }
     );

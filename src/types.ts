@@ -36,10 +36,20 @@ export interface Slot {
   conflicts: Conflict[];
 }
 
+/** Non-secret identity metadata for the agent authenticated by the API. */
+export interface AuthenticatedActor {
+  agentUserId: string;
+  displayName: string;
+}
+
+export interface AvailabilityMeta extends Record<string, unknown> {
+  actor: AuthenticatedActor;
+}
+
 export interface AvailabilityResult {
   availability: Slot[];
   booked: Slot[];
-  meta: Record<string, unknown>;
+  meta: AvailabilityMeta;
 }
 
 export interface BookingInput {
@@ -83,5 +93,6 @@ export interface BookingResult {
   idempotentReplay?: boolean;
   idempotencyKey: string;
   booking: BookingSnapshot;
+  actor: AuthenticatedActor;
   warnings?: string[];
 }
