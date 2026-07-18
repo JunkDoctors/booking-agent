@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -92,6 +92,75 @@ test("missing per-agent token exits auth failure and ignores legacy token source
       );
       assert.equal(calls, 0);
     });
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("owner-only scheduling token file authenticates when the environment has no token", async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), "jd-schedule-home-"));
+  await mkdir(path.join(home, ".jd"));
+  await writeFile(path.join(home, ".jd", "scheduling-token"), `${validToken}\n`, { mode: 0o600 });
+  try {
+    await withApi((request, response) => {
+      assert.equal(request.headers.authorization, `Bearer ${validToken}`);
+      json(response, 200, {
+        availability: [], booked: [],
+        meta: { timezone: "America/New_York", actor: { agentUserId: "agent00001", displayName: "Scheduler One" } }
+      });
+    }, async (baseUrl) => {
+      const { stdout } = await cli(["slots", "--json"], baseUrl, {
+        HOME: home,
+        JD_SCHEDULING_API_TOKEN: undefined
+      });
+      assert.equal(JSON.parse(stdout).ok, true);
+    });
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("an explicitly empty token environment variable disables file fallback", async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), "jd-schedule-home-"));
+  await mkdir(path.join(home, ".jd"));
+  await writeFile(path.join(home, ".jd", "scheduling-token"), `${validToken}\n`, { mode: 0o600 });
+  try {
+    await assert.rejects(
+      cli(["slots", "--json"], "http://127.0.0.1:1", {
+        HOME: home,
+        JD_SCHEDULING_API_TOKEN: ""
+      }),
+      (error) => {
+        assert.equal(error.code, 3);
+        assert.equal(JSON.parse(error.stderr).error.code, "auth_missing");
+        return true;
+      }
+    );
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("scheduling token file with group or other access is ignored", async () => {
+  if (process.platform === "win32") return;
+  const home = await mkdtemp(path.join(os.tmpdir(), "jd-schedule-home-"));
+  await mkdir(path.join(home, ".jd"));
+  const tokenFile = path.join(home, ".jd", "scheduling-token");
+  await writeFile(tokenFile, `${validToken}\n`, { mode: 0o600 });
+  await chmod(tokenFile, 0o644);
+  try {
+    await assert.rejects(
+      cli(["slots", "--json"], "http://127.0.0.1:1", {
+        HOME: home,
+        JD_SCHEDULING_API_TOKEN: undefined
+      }),
+      (error) => {
+        assert.equal(error.code, 3);
+        assert.equal(JSON.parse(error.stderr).error.code, "auth_missing");
+        assert.doesNotMatch(error.stderr, new RegExp(validToken));
+        return true;
+      }
+    );
   } finally {
     await rm(home, { recursive: true, force: true });
   }

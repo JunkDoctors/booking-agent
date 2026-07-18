@@ -16,11 +16,27 @@ interface StoredConfig {
 
 export function loadConfig(): Config {
   const stored = readStoredConfig(path.join(os.homedir(), ".jd", "config.json"));
+  const tokenFromEnvironment = Object.prototype.hasOwnProperty.call(process.env, "JD_SCHEDULING_API_TOKEN");
   return {
     apiBaseUrl: clean(process.env.JD_SCHEDULING_API_BASE_URL) ?? clean(process.env.JD_API_BASE_URL) ?? clean(stored.apiBaseUrl) ?? defaultApiBaseUrl,
-    apiToken: clean(process.env.JD_SCHEDULING_API_TOKEN),
+    apiToken: tokenFromEnvironment
+      ? clean(process.env.JD_SCHEDULING_API_TOKEN)
+      : readTokenFile(path.join(os.homedir(), ".jd", "scheduling-token")),
     timeoutMs: parseTimeout(process.env.JD_SCHEDULING_TIMEOUT_MS)
   };
+}
+
+function readTokenFile(file: string): string | undefined {
+  if (process.platform === "win32") return undefined;
+  try {
+    const stat = fs.statSync(file);
+    if (!stat.isFile()) return undefined;
+    if (typeof process.getuid === "function" && stat.uid !== process.getuid()) return undefined;
+    if ((stat.mode & 0o077) !== 0) return undefined;
+    return clean(fs.readFileSync(file, "utf8"));
+  } catch {
+    return undefined;
+  }
 }
 
 function readStoredConfig(file: string): StoredConfig {
