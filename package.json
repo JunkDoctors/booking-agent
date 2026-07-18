@@ -1,0 +1,22 @@
+{
+  "name": "@junkdoctors/scheduling-cli",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Safe, agent-friendly CLI for JunkDoctors service availability and booking.",
+  "type": "module",
+  "bin": {
+    "jd-schedule": "./bin/jd-schedule"
+  },
+  "scripts": {
+    "build": "tsc",
+    "check": "tsc --noEmit",
+    "test": "npm run check && npm run build && node --test tests/*.test.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.8.0"
+  }
+}
